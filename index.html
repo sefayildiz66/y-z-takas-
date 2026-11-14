@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0e1012">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Yüz Takas">
+<title>Yüz Takas Stüdyosu</title>
+<script src="coi-serviceworker.min.js"></script>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg">
+<link rel="apple-touch-icon" href="icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+<link rel="stylesheet" crossorigin="anonymous" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700&family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="bar">
+  <div class="brand"><h1>Yüz Takas <em>Stüdyosu</em></h1></div>
+  <div class="status" id="status" data-s="idle" role="status"><span class="lamp"></span><span id="statusText">Başlatılıyor</span></div>
+</header>
+
+<main class="wrap">
+  <section class="card" id="secModels">
+    <h2><span class="n off" id="nModels">0</span>Yapay zekâ modelleri</h2>
+    <div class="models" id="modelList"></div>
+    <div class="progress" id="modelProg" hidden><i id="modelBar"></i></div>
+    <button class="btn primary wide" id="loadModels" type="button">Modelleri indir ve başlat</button>
+    <p class="hint" id="modelHint">Bir kereye mahsus indirilir ve telefonda saklanır. İlk indirmeyi Wi-Fi'de yap.</p>
+  </section>
+
+  <section class="card">
+    <h2><span class="n off" id="nSource">1</span>Kaynak yüz <small>kimin yüzü gelecek</small></h2>
+    <div id="identities" class="identities"></div>
+    <button class="btn ghost small" id="addIdentity" type="button">+ Başka bir kişi ekle</button>
+    <p class="hint" id="sourceHint">Aynı kişiden 2–5 net fotoğraf (önden, iyi ışık) sonucu belirgin şekilde iyileştirir.</p>
+  </section>
+
+  <section class="card">
+    <h2><span class="n off" id="nTarget">2</span>Hedef <small>fotoğraf veya video</small></h2>
+    <label class="pick" id="targetPick">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-9 9"/></svg>
+      <span>Galeriden fotoğraf veya video seç</span>
+      <input id="targetInput" type="file" accept="image/*,video/*">
+    </label>
+    <p class="meta" id="targetMeta"></p>
+    <div class="stage" id="stage" hidden>
+      <canvas id="view"></canvas>
+      <button class="btn small floating" id="compareBtn" type="button" hidden>Önce / sonra</button>
+    </div>
+    <div id="persons" class="persons" hidden></div>
+  </section>
+
+  <section class="card">
+    <h2><span class="n off">3</span>Kalite</h2>
+    <div class="seg" id="preset" role="radiogroup" aria-label="Kalite profili">
+      <button role="radio" data-v="fast" aria-checked="false" type="button">Hızlı</button>
+      <button role="radio" data-v="high" aria-checked="true" type="button">Yüksek</button>
+      <button role="radio" data-v="max" aria-checked="false" type="button">Maksimum</button>
+    </div>
+    <p class="hint" id="presetHint"></p>
+    <label class="check"><input id="wm" type="checkbox" checked><span>“AI ile düzenlendi” işareti koy</span></label>
+    <label class="check"><input id="consent" type="checkbox"><span>Görüntülerdeki kişilerin onayı var.</span></label>
+  </section>
+
+  <section class="card" id="secResult" hidden>
+    <h2>Sonuç</h2>
+    <div class="progress" id="jobProg"><i id="jobBar"></i></div>
+    <p class="meta" id="jobMsg"></p>
+    <img class="result" id="resultImg" alt="Sonuç" hidden>
+    <video class="result" id="resultVid" controls playsinline hidden></video>
+    <div class="row" id="resultActions" hidden>
+      <button class="btn primary" id="saveBtn" type="button">Fotoğraflar'a kaydet</button>
+      <a class="btn" id="dlLink" download>İndir</a>
+    </div>
+    <button class="btn ghost small" id="cancelBtn" type="button" hidden>Durdur</button>
+  </section>
+  <div class="spacer"></div>
+</main>
+
+<div class="dock">
+  <button class="btn primary wide" id="startBtn" type="button" disabled>Başlat</button>
+  <p class="dockhint" id="dockHint"></p>
+</div>
+
+<template id="tplIdentity">
+  <div class="identity">
+    <div class="idhead"><b></b><span></span><button class="link" type="button" data-rm>Kaldır</button></div>
+    <div class="photos"></div>
+  </div>
+</template>
+
+<script src="vendor/mp4box.all.min.js"></script>
+<script src="vendor/mp4-muxer.js"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
