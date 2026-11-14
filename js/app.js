@@ -11,9 +11,11 @@ const fmtMB = b => Math.round(b / 1048576) + ' MB';
 
 /* ================= modeller ================= */
 const HF = repo => `https://huggingface.co/facefusion/${repo}/resolve/main/`;
+// local: uygulamayla gelen (yarı hassasiyete çevrilmiş, yarı boyutlu) model
+const urlOf = spec => spec.local ? new URL('../assets/' + spec.file, import.meta.url).href : HF(spec.repo) + spec.file;
 const MODELS = {
   detector:   { file: 'scrfd_2.5g.onnx',         repo: 'models-3.0.0', size: 3295067,   label: 'Yüz tespiti',  gpu: false },
-  recognizer: { file: 'arcface_w600k_r50.onnx',  repo: 'models-3.0.0', size: 174388474, label: 'Kimlik tanıma', gpu: true },
+  recognizer: { file: 'arcface_w600k_r50_fp16.onnx', local: true, size: 87206797, label: 'Kimlik tanıma', gpu: true },
   swapper:    { file: 'inswapper_128_fp16.onnx', repo: 'models-3.0.0', size: 277680829, label: 'Yüz takası · InSwapper', gpu: true },
   hyperswap:  { file: 'hyperswap_1c_256.onnx',   repo: 'models-3.3.0', size: 402742682, label: 'Yüz takası · HyperSwap', gpu: true, preset: 'max' },
   enhancer:   { file: 'gfpgan_1.4.onnx',         repo: 'models-3.0.0', size: 340299087, label: 'İyileştirme · GFPGAN', gpu: true, preset: 'high' },
@@ -28,7 +30,7 @@ const PRESETS = {
   max:  { model: 'hyperswap', size: 512, enhance: true, occlusion: true, region: true, short: 2160, bpp: 0.22,
     hint: 'HyperSwap 512 px + iyileştirme + engel ve yüz bölgesi maskeleri, orijinal çözünürlük. En iyi kalite ama çok bellek ister; uzun videolarda sayfa kapanabilir.' },
 };
-const needFor = p => ['detector', 'recognizer', PRESETS[p].model, ...(PRESETS[p].enhance ? ['enhancer'] : []), ...(PRESETS[p].occlusion ? ['occluder'] : []), ...(PRESETS[p].region ? ['parser'] : [])];
+const needFor = p => [PRESETS[p].model, 'recognizer', 'detector', ...(PRESETS[p].enhance ? ['enhancer'] : []), ...(PRESETS[p].occlusion ? ['occluder'] : []), ...(PRESETS[p].region ? ['parser'] : [])];
 
 const CACHE = 'yts-models-v1', ckey = f => 'https://yts.cache/models/' + f;
 ort.env.logLevel = 'error';
@@ -49,7 +51,7 @@ async function download(spec, onp) {
   let lastErr;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const r = await fetch(HF(spec.repo) + spec.file);
+      const r = await fetch(urlOf(spec));
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const total = +r.headers.get('content-length') || spec.size; let got = 0;
       const counter = new TransformStream({ transform(chunk, ctl) { got += chunk.byteLength; onp(Math.min(1, got / total)); ctl.enqueue(chunk); } });
@@ -72,7 +74,7 @@ function storageWarn() {
 async function getModel(spec, onp = () => {}) {
   let cache = null; try { cache = await caches.open(CACHE); } catch {}
   if (cache) { const hit = await cache.match(ckey(spec.file)); if (hit) { onp(1); return new Uint8Array(await hit.arrayBuffer()); } }
-  const r = await fetch(HF(spec.repo) + spec.file);
+  const r = await fetch(urlOf(spec));
   if (!r.ok) throw new Error(`${spec.label} indirilemedi (HTTP ${r.status})`);
   return new Uint8Array(await r.arrayBuffer());
 }
@@ -134,7 +136,7 @@ async function loadModel(key) {
   await download(spec, prog);
   let bytes = await getModel(spec), s = null;
   setStatus('busy', spec.label.split(' · ').pop() + ' hazırlanıyor');
-  if (gpuOK && spec.gpu && !store('nogpu-' + key)) {
+  if (gpuOK && spec.gpu && !store('nogpu2-' + key)) {
     try {
       crumb(`${key}:gpu`);
       s = await ort.InferenceSession.create(bytes, opts('webgpu'));
@@ -144,7 +146,7 @@ async function loadModel(key) {
   modelEP[key] = s ? 'GPU' : 'CPU';
   if (!s) { crumb(`${key}:cpu`); s = await ort.InferenceSession.create(bytes, opts('wasm')); }
   crumb('');
-  bytes = null;
+  bytes = null; await sleep(400);
   sessions[key] = new SafeSession(key, s); modelState[key] = 'loaded'; $('modelProg').hidden = true; renderModels();
   return sessions[key];
 }
@@ -218,7 +220,7 @@ function lastCrash() {
   const step = store('step'); if (!step) return null;
   crumb('');
   const [key, phase] = step.split(':'), n = +(store('crash-' + step) || 0) + 1; store('crash-' + step, String(n));
-  if (phase === 'gpu') store('nogpu-' + key, '1');
+  if (phase === 'gpu') store('nogpu2-' + key, '1');
   return { key, phase, n, text: `Önceki açılışta sayfa “${MODELS[key]?.label || key}” ${STEP_TR[phase] || ''} kapandı (telefonun belleği yetmedi).` +
     (phase === 'gpu' ? ' Bu model bundan sonra işlemcide açılacak.' : phase === 'cpu' ? ' Daha az model kullanan “Hızlı” profili seçildi.' : '') };
 }
