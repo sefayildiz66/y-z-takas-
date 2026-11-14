@@ -33,7 +33,9 @@ const needFor = p => ['detector', 'recognizer', PRESETS[p].model, ...(PRESETS[p]
 const CACHE = 'yts-models-v1', ckey = f => 'https://yts.cache/models/' + f;
 ort.env.logLevel = 'error';
 ort.env.wasm.wasmPaths = new URL('../vendor/', import.meta.url).href;
-ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 4) : 1;
+const IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+// iPhone'da tek iş parçacığı: daha az bellek (asıl iş zaten ekran kartında)
+ort.env.wasm.numThreads = !IOS && self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 4) : 1;
 
 const sessions = {}, modelEP = {}, modelState = {};
 let engine = null, gpuOK = false, starting = false;
@@ -81,8 +83,9 @@ async function downloadAll(keys) {
   for (const k of missing) {
     const spec = MODELS[k];
     setStatus('busy', 'İndiriliyor');
+    crumb(`${k}:dl`);
     await download(spec, p => { modelState[k] = '%' + Math.floor(p * 100); renderModels(); setBar('model', (doneBytes + p * spec.size) / total); });
-    doneBytes += spec.size; modelState[k] = 'cached'; renderModels();
+    crumb(''); doneBytes += spec.size; modelState[k] = 'cached'; renderModels();
   }
   $('modelProg').hidden = true;
 }
@@ -91,7 +94,7 @@ async function downloadAll(keys) {
    o model otomatik olarak işlemciye taşınır ve aynı iş tekrar denenir. */
 let chain = Promise.resolve();
 const serial = fn => { const p = chain.then(fn, fn); chain = p.catch(() => {}); return p; };
-const opts = ep => ({ executionProviders: [ep], graphOptimizationLevel: 'all' });
+const opts = ep => ({ executionProviders: [ep], graphOptimizationLevel: 'all', enableCpuMemArena: false, enableMemPattern: false });
 class SafeSession {
   constructor(key, s) { this.key = key; this.s = s; }
   get inputNames() { return this.s.inputNames; }
@@ -131,14 +134,16 @@ async function loadModel(key) {
   await download(spec, prog);
   let bytes = await getModel(spec), s = null;
   setStatus('busy', spec.label.split(' · ').pop() + ' hazırlanıyor');
-  if (gpuOK && spec.gpu) {
+  if (gpuOK && spec.gpu && !store('nogpu-' + key)) {
     try {
+      crumb(`${key}:gpu`);
       s = await ort.InferenceSession.create(bytes, opts('webgpu'));
       if (!(await validate(s, key))) { await s.release(); s = null; }
     } catch (e) { console.warn('WebGPU açılamadı', key, e?.message || e); s = null; }
   }
   modelEP[key] = s ? 'GPU' : 'CPU';
-  if (!s) s = await ort.InferenceSession.create(bytes, opts('wasm'));
+  if (!s) { crumb(`${key}:cpu`); s = await ort.InferenceSession.create(bytes, opts('wasm')); }
+  crumb('');
   bytes = null;
   sessions[key] = new SafeSession(key, s); modelState[key] = 'loaded'; $('modelProg').hidden = true; renderModels();
   return sessions[key];
@@ -203,6 +208,23 @@ async function refreshModelState() {
   renderModels();
 }
 $('loadModels').onclick = startEngine;
+
+/* ================= tanılama ================= */
+// Ağır adımlardan önce bir iz bırakılır. iPhone sayfayı bellek yüzünden kapatırsa, bir sonraki açılışta
+// hangi adımda kapandığı ekranda görünür ve o adım bir dahaki sefere daha hafif yoldan yapılır.
+function crumb(step) { store('step', step); }
+const STEP_TR = { gpu: 'ekran kartında açılırken', cpu: 'işlemcide açılırken', dl: 'indirilirken' };
+function lastCrash() {
+  const step = store('step'); if (!step) return null;
+  crumb('');
+  const [key, phase] = step.split(':'), n = +(store('crash-' + step) || 0) + 1; store('crash-' + step, String(n));
+  if (phase === 'gpu') store('nogpu-' + key, '1');
+  return { key, phase, n, text: `Önceki açılışta sayfa “${MODELS[key]?.label || key}” ${STEP_TR[phase] || ''} kapandı (telefonun belleği yetmedi).` +
+    (phase === 'gpu' ? ' Bu model bundan sonra işlemcide açılacak.' : phase === 'cpu' ? ' Daha az model kullanan “Hızlı” profili seçildi.' : '') };
+}
+function showError(msg) { const h = $('modelHint'); h.innerHTML = `<span class="err">${String(msg).replace(/</g, '&lt;').slice(0, 300)}</span>`; }
+addEventListener('error', e => showError('Hata: ' + (e.message || e.error)));
+addEventListener('unhandledrejection', e => showError('Hata: ' + (e.reason?.message || e.reason)));
 
 /* ================= durum ================= */
 const S = { preset: PRESETS[store('preset')] ? store('preset') : 'high', identities: [{ photos: [], emb: null }], target: null, busy: false, running: false, cancel: false, result: null };
@@ -527,7 +549,10 @@ function refresh() {
 (async () => {
   renderIdentities(); renderPreset(); refresh();
   gpuOK = await detectGPU();
+  const crash = lastCrash();
+  if (crash?.phase === 'cpu' && S.preset !== 'fast') { S.preset = 'fast'; store('preset', 'fast'); }
   await refreshModelState(); renderPreset();
-  if (needFor(S.preset).every(k => modelState[k] === 'cached')) startEngine();
+  if (crash) { setStatus('error', 'Sayfa kapanmıştı'); showError(crash.text + ' “Başlat”a basarak tekrar dene.'); }
+  else if (needFor(S.preset).every(k => modelState[k] === 'cached')) startEngine();
   else { setStatus('idle', 'Modeller indirilmedi'); if (!gpuOK) $('modelHint').textContent = 'Bu tarayıcıda ekran kartı (WebGPU) yok; işlem çok yavaş olur. iPhone\'da Safari\'yi güncel tut.'; }
 })();
