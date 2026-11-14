@@ -13,7 +13,7 @@ const fmtMB = b => Math.round(b / 1048576) + ' MB';
 const HF = repo => `https://huggingface.co/facefusion/${repo}/resolve/main/`;
 const MODELS = {
   detector:   { file: 'scrfd_2.5g.onnx',         repo: 'models-3.0.0', size: 3295067,   label: 'Yüz tespiti',  gpu: false },
-  recognizer: { file: 'arcface_w600k_r50.onnx',  repo: 'models-3.0.0', size: 174388474, label: 'Kimlik tanıma', gpu: false },
+  recognizer: { file: 'arcface_w600k_r50.onnx',  repo: 'models-3.0.0', size: 174388474, label: 'Kimlik tanıma', gpu: true },
   swapper:    { file: 'inswapper_128_fp16.onnx', repo: 'models-3.0.0', size: 277680829, label: 'Yüz takası · InSwapper', gpu: true },
   hyperswap:  { file: 'hyperswap_1c_256.onnx',   repo: 'models-3.3.0', size: 402742682, label: 'Yüz takası · HyperSwap', gpu: true, preset: 'max' },
   enhancer:   { file: 'gfpgan_1.4.onnx',         repo: 'models-3.0.0', size: 340299087, label: 'İyileştirme · GFPGAN', gpu: true, preset: 'high' },
@@ -23,10 +23,10 @@ const MODELS = {
 const PRESETS = {
   fast: { model: 'swapper', size: 128, enhance: false, occlusion: false, region: false, short: 720, bpp: 0.12,
     hint: 'InSwapper 128 px. En hızlısı; uzun videolar ve deneme için.' },
-  high: { model: 'swapper', size: 256, enhance: true, occlusion: true, region: false, short: 1080, bpp: 0.16,
-    hint: 'InSwapper 256 px + GFPGAN iyileştirme + engel maskesi (el, saç, gözlük). Çoğu iş için en iyi denge.' },
+  high: { model: 'swapper', size: 256, enhance: false, occlusion: true, region: false, short: 1080, bpp: 0.16,
+    hint: 'InSwapper 256 px + engel maskesi (el, saç, gözlük önündeyse korunur). Telefonda en iyi denge.' },
   max:  { model: 'hyperswap', size: 512, enhance: true, occlusion: true, region: true, short: 2160, bpp: 0.22,
-    hint: 'HyperSwap 512 px + iyileştirme + engel ve yüz bölgesi maskeleri, orijinal çözünürlük. En iyi kalite, en yavaş.' },
+    hint: 'HyperSwap 512 px + iyileştirme + engel ve yüz bölgesi maskeleri, orijinal çözünürlük. En iyi kalite ama çok bellek ister; uzun videolarda sayfa kapanabilir.' },
 };
 const needFor = p => ['detector', 'recognizer', PRESETS[p].model, ...(PRESETS[p].enhance ? ['enhancer'] : []), ...(PRESETS[p].occlusion ? ['occluder'] : []), ...(PRESETS[p].region ? ['parser'] : [])];
 
@@ -39,25 +39,52 @@ const sessions = {}, modelEP = {}, modelState = {};
 let engine = null, gpuOK = false, starting = false;
 
 async function cacheHas(file) { try { return !!(await (await caches.open(CACHE)).match(ckey(file))); } catch { return false; } }
-async function getModel(spec, onp) {
+// İndirme belleğe alınmadan doğrudan telefonun depolamasına akar (iPhone'da sayfanın kapanmasını önler)
+async function download(spec, onp) {
   let cache = null; try { cache = await caches.open(CACHE); } catch {}
-  if (cache) { const hit = await cache.match(ckey(spec.file)); if (hit) { onp(1); return new Uint8Array(await hit.arrayBuffer()); } }
+  if (cache && await cache.match(ckey(spec.file))) { onp(1); return; }
+  if (!cache) return; // önbellek yoksa (gizli sekme) model yüklenirken doğrudan indirilir
   let lastErr;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       const r = await fetch(HF(spec.repo) + spec.file);
       if (!r.ok) throw new Error('HTTP ' + r.status);
-      const total = +r.headers.get('content-length') || spec.size;
-      const buf = new Uint8Array(total); let got = 0; const rd = r.body.getReader();
-      for (;;) { const { done, value } = await rd.read(); if (done) break;
-        if (got + value.length > buf.length) throw new Error('beklenmeyen boyut');
-        buf.set(value, got); got += value.length; onp(got / total); }
-      if (got !== total) throw new Error('eksik indirme');
-      if (cache) { try { await cache.put(ckey(spec.file), new Response(buf)); } catch (e) { console.warn('önbellek', e); } }
-      return buf;
-    } catch (e) { lastErr = e; await sleep(2000 * attempt); }
+      const total = +r.headers.get('content-length') || spec.size; let got = 0;
+      const counter = new TransformStream({ transform(chunk, ctl) { got += chunk.byteLength; onp(Math.min(1, got / total)); ctl.enqueue(chunk); } });
+      await cache.put(ckey(spec.file), new Response(r.body.pipeThrough(counter), { headers: { 'content-type': 'application/octet-stream', 'content-length': String(total) } }));
+      if (got !== total) { await cache.delete(ckey(spec.file)); throw new Error('eksik indirme'); }
+      return;
+    } catch (e) {
+      lastErr = e; console.warn('indirme', spec.file, e);
+      try { await cache.delete(ckey(spec.file)); } catch {}
+      // Depolama dolu / yazılamıyor: kaydetmeden devam edilir, model yüklenirken doğrudan indirilir
+      if (/Quota|Cache|internal/i.test(String(e?.name) + String(e?.message))) { storageWarn(); return; }
+      await sleep(2000 * attempt);
+    }
   }
-  throw new Error(`${spec.label} indirilemedi (${lastErr?.message}). İnternet bağlantını kontrol et.`);
+  throw new Error(`${spec.label} indirilemedi (${lastErr?.message}). Wi-Fi bağlantını kontrol edip tekrar dene.`);
+}
+function storageWarn() {
+  $('modelHint').innerHTML = '<span class="err">Modeller telefona kaydedilemedi (depolama dolu olabilir). Uygulama çalışır ama her açılışta modeller yeniden iner. iPhone\'da yer açıp sayfayı yenile.</span>';
+}
+async function getModel(spec, onp = () => {}) {
+  let cache = null; try { cache = await caches.open(CACHE); } catch {}
+  if (cache) { const hit = await cache.match(ckey(spec.file)); if (hit) { onp(1); return new Uint8Array(await hit.arrayBuffer()); } }
+  const r = await fetch(HF(spec.repo) + spec.file);
+  if (!r.ok) throw new Error(`${spec.label} indirilemedi (HTTP ${r.status})`);
+  return new Uint8Array(await r.arrayBuffer());
+}
+// Önce eksik modellerin hepsi indirilir, sonra yüklenir (aynı anda bellekte daha az veri)
+async function downloadAll(keys) {
+  const missing = keys.filter(k => modelState[k] === 'missing');
+  const total = missing.reduce((a, k) => a + MODELS[k].size, 0); let doneBytes = 0;
+  for (const k of missing) {
+    const spec = MODELS[k];
+    setStatus('busy', 'İndiriliyor');
+    await download(spec, p => { modelState[k] = '%' + Math.floor(p * 100); renderModels(); setBar('model', (doneBytes + p * spec.size) / total); });
+    doneBytes += spec.size; modelState[k] = 'cached'; renderModels();
+  }
+  $('modelProg').hidden = true;
 }
 
 /* Tüm model çalıştırmaları tek sırada yürür. Ekran kartı bir çalıştırmada hata verirse
@@ -101,7 +128,8 @@ async function loadModel(key) {
   const spec = MODELS[key];
   const prog = p => { modelState[key] = '%' + Math.floor(p * 100); renderModels(); setBar('model', p); };
   setStatus('busy', spec.label.split(' · ').pop() + ' yükleniyor');
-  let bytes = await getModel(spec, prog), s = null;
+  await download(spec, prog);
+  let bytes = await getModel(spec), s = null;
   setStatus('busy', spec.label.split(' · ').pop() + ' hazırlanıyor');
   if (gpuOK && spec.gpu) {
     try {
@@ -120,9 +148,12 @@ async function unloadModel(key) { const s = sessions[key]; if (!s) return; delet
 // Seçili profil için gereken modelleri yükler, gereksiz takas modelini bırakır (telefon belleği için)
 async function prepare(presetKey) {
   const p = PRESETS[presetKey];
-  for (const k of needFor(presetKey)) await loadModel(k);
   const other = p.model === 'swapper' ? 'hyperswap' : 'swapper';
   if (sessions[other]) await unloadModel(other);
+  const need = new Set(needFor(presetKey));
+  for (const k of ['enhancer', 'occluder', 'parser']) if (!need.has(k) && sessions[k]) await unloadModel(k);
+  await downloadAll([...need]);
+  for (const k of needFor(presetKey)) await loadModel(k);
   engine.s.swapper = sessions[p.model]; engine.s.swapperType = p.model === 'hyperswap' ? 'hyperswap' : 'inswapper';
   engine.s.enhancer = sessions.enhancer; engine.s.occluder = sessions.occluder; engine.s.parser = sessions.parser;
   readyStatus();
@@ -137,6 +168,7 @@ async function startEngine() {
   try {
     try { await navigator.storage?.persist?.(); } catch {}
     const emap = new Float32Array(await (await fetch(new URL('../assets/inswapper_emap.bin', import.meta.url))).arrayBuffer());
+    await downloadAll(needFor(S.preset));
     for (const k of needFor(S.preset)) await loadModel(k);
     engine = new FaceEngine(ort, { detector: sessions.detector, recognizer: sessions.recognizer }, emap);
     await prepare(S.preset);

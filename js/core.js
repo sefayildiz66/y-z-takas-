@@ -152,6 +152,7 @@ export const PROBE_STEP = 97;
 export function probeFeeds(key, Tensor) {
   const T = (a, sh) => new Tensor('float32', a, sh);
   switch (key) {
+    case 'recognizer': return { input: T(probeInput(3 * 112 * 112).map(v => v * 2 - 1), [1, 3, 112, 112]) };
     case 'swapper': return { target: T(probeInput(3 * 128 * 128), [1, 3, 128, 128]), source: T(probeLatent(), [1, 512]) };
     case 'hyperswap': return { target: T(probeInput(3 * 256 * 256).map(v => v * 2 - 1), [1, 3, 256, 256]), source: T(probeLatent(), [1, 512]) };
     case 'enhancer': return { input: T(probeInput(3 * 512 * 512).map(v => v * 2 - 1), [1, 3, 512, 512]) };
@@ -160,7 +161,7 @@ export function probeFeeds(key, Tensor) {
   }
   return null;
 }
-export const PROBE_TOL = { swapper: 0.02, hyperswap: 0.03, enhancer: 0.04, occluder: 0.03, parser: 0.25 };
+export const PROBE_TOL = { recognizer: 0.05, swapper: 0.02, hyperswap: 0.03, enhancer: 0.04, occluder: 0.03, parser: 0.25 };
 
 /* ---------- motor ---------- */
 export class FaceEngine {
