@@ -10,17 +10,35 @@ const store = (k, v) => { try { if (v === undefined) return localStorage.getItem
 const fmtMB = b => Math.round(b / 1048576) + ' MB';
 
 /* ================= modeller ================= */
-const HF = repo => `https://huggingface.co/facefusion/${repo}/resolve/main/`;
-// local: uygulamayla gelen (yarı hassasiyete çevrilmiş, yarı boyutlu) model
-const urlOf = spec => spec.local ? new URL('../assets/' + spec.file, import.meta.url).href : HF(spec.repo) + spec.file;
+const urlsOf = spec => (spec.parts ? [...Array(spec.parts).keys()].map(i => spec.file + '.part' + i) : [spec.file]).map(f => new URL('../assets/' + f, import.meta.url).href);
+// Parçaları sırayla indirip tek bir akış olarak verir
+function fetchStream(spec) {
+  const urls = urlsOf(spec); let i = 0, reader = null;
+  return new ReadableStream({
+    async pull(ctl) {
+      for (;;) {
+        if (!reader) {
+          if (i >= urls.length) { ctl.close(); return; }
+          const r = await fetch(urls[i++]); if (!r.ok) throw new Error('HTTP ' + r.status);
+          reader = r.body.getReader();
+        }
+        const { done, value } = await reader.read();
+        if (done) { reader = null; continue; }
+        ctl.enqueue(value); return;
+      }
+    }
+  });
+}
+// Modeller uygulamayla birlikte gelir ve telefon için 8 bit'e sıkıştırılmıştır (bellek ~4 kat az, sonuç aynı).
+// 100 MB'tan büyük olanlar parçalar halinde durur ve indirilirken birleştirilir.
 const MODELS = {
-  detector:   { file: 'scrfd_2.5g.onnx',         repo: 'models-3.0.0', size: 3295067,   label: 'Yüz tespiti',  gpu: false },
-  recognizer: { file: 'arcface_w600k_r50_fp16.onnx', local: true, size: 87206797, label: 'Kimlik tanıma', gpu: true },
-  swapper:    { file: 'inswapper_128_fp16.onnx', repo: 'models-3.0.0', size: 277680829, label: 'Yüz takası · InSwapper', gpu: true },
-  hyperswap:  { file: 'hyperswap_1c_256.onnx',   repo: 'models-3.3.0', size: 402742682, label: 'Yüz takası · HyperSwap', gpu: true, preset: 'max' },
-  enhancer:   { file: 'gfpgan_1.4.onnx',         repo: 'models-3.0.0', size: 340299087, label: 'İyileştirme · GFPGAN', gpu: true, preset: 'high' },
-  occluder:   { file: 'xseg_1.onnx',             repo: 'models-3.1.0', size: 70324286,  label: 'Engel maskesi · XSeg', gpu: true, preset: 'high' },
-  parser:     { file: 'bisenet_resnet_18.onnx',  repo: 'models-3.1.0', size: 53205356,  label: 'Yüz bölgesi · BiSeNet', gpu: true, preset: 'max' },
+  detector:   { file: 'scrfd_2.5g.onnx',             size: 3295067,   label: 'Yüz tespiti',  gpu: false, full: true },
+  recognizer: { file: 'arcface_w600k_r50_int8.onnx', size: 43861567,  label: 'Kimlik tanıma', gpu: true },
+  swapper:    { file: 'inswapper_128_int8.onnx',     size: 139182762, label: 'Yüz takası · InSwapper', gpu: true, parts: 3 },
+  hyperswap:  { file: 'hyperswap_1c_256_int8.onnx',  size: 202104787, label: 'Yüz takası · HyperSwap', gpu: true, parts: 4 },
+  enhancer:   { file: 'gfpgan_1.4_int8.onnx',        size: 158482254, label: 'İyileştirme · GFPGAN', gpu: true, parts: 3 },
+  occluder:   { file: 'xseg_1_int8.onnx',            size: 17828697,  label: 'Engel maskesi · XSeg', gpu: true },
+  parser:     { file: 'bisenet_resnet_18_int8.onnx', size: 13454764,  label: 'Yüz bölgesi · BiSeNet', gpu: true },
 };
 const PRESETS = {
   fast: { model: 'swapper', size: 128, enhance: false, occlusion: false, region: false, short: 720, bpp: 0.12,
@@ -51,11 +69,9 @@ async function download(spec, onp) {
   let lastErr;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const r = await fetch(urlOf(spec));
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      const total = +r.headers.get('content-length') || spec.size; let got = 0;
+      const total = spec.size; let got = 0;
       const counter = new TransformStream({ transform(chunk, ctl) { got += chunk.byteLength; onp(Math.min(1, got / total)); ctl.enqueue(chunk); } });
-      await cache.put(ckey(spec.file), new Response(r.body.pipeThrough(counter), { headers: { 'content-type': 'application/octet-stream', 'content-length': String(total) } }));
+      await cache.put(ckey(spec.file), new Response(fetchStream(spec).pipeThrough(counter), { headers: { 'content-type': 'application/octet-stream', 'content-length': String(total) } }));
       if (got !== total) { await cache.delete(ckey(spec.file)); throw new Error('eksik indirme'); }
       return;
     } catch (e) {
@@ -74,9 +90,7 @@ function storageWarn() {
 async function getModel(spec, onp = () => {}) {
   let cache = null; try { cache = await caches.open(CACHE); } catch {}
   if (cache) { const hit = await cache.match(ckey(spec.file)); if (hit) { onp(1); return new Uint8Array(await hit.arrayBuffer()); } }
-  const r = await fetch(urlOf(spec));
-  if (!r.ok) throw new Error(`${spec.label} indirilemedi (HTTP ${r.status})`);
-  return new Uint8Array(await r.arrayBuffer());
+  return new Uint8Array(await new Response(fetchStream(spec)).arrayBuffer());
 }
 // Önce eksik modellerin hepsi indirilir, sonra yüklenir (aynı anda bellekte daha az veri)
 async function downloadAll(keys) {
@@ -96,7 +110,7 @@ async function downloadAll(keys) {
    o model otomatik olarak işlemciye taşınır ve aynı iş tekrar denenir. */
 let chain = Promise.resolve();
 const serial = fn => { const p = chain.then(fn, fn); chain = p.catch(() => {}); return p; };
-const opts = ep => ({ executionProviders: [ep], graphOptimizationLevel: 'all', enableCpuMemArena: false, enableMemPattern: false });
+const opts = (ep, key) => ({ executionProviders: [ep], graphOptimizationLevel: MODELS[key]?.full ? 'all' : 'basic', enableCpuMemArena: false, enableMemPattern: false });
 class SafeSession {
   constructor(key, s) { this.key = key; this.s = s; }
   get inputNames() { return this.s.inputNames; }
@@ -108,7 +122,7 @@ class SafeSession {
         if (modelEP[this.key] !== 'GPU') throw e;
         console.warn('Ekran kartı hatası, işlemciye geçiliyor:', this.key, e?.message || e);
         const bytes = await getModel(MODELS[this.key], () => {});
-        const cpu = await ort.InferenceSession.create(bytes, opts('wasm'));
+        const cpu = await ort.InferenceSession.create(bytes, opts('wasm', this.key));
         try { await this.s.release(); } catch {}
         this.s = cpu; modelEP[this.key] = 'CPU'; renderModels();
         $('modelHint').innerHTML = '<span class="err">Ekran kartı bir hata verdi; işlem durmadan işlemciye geçildi (daha yavaş). Hızı geri almak için sayfayı yenile.</span>';
@@ -136,15 +150,15 @@ async function loadModel(key) {
   await download(spec, prog);
   let bytes = await getModel(spec), s = null;
   setStatus('busy', spec.label.split(' · ').pop() + ' hazırlanıyor');
-  if (gpuOK && spec.gpu && !store('nogpu2-' + key)) {
+  if (gpuOK && spec.gpu && !store('nogpu3-' + key)) {
     try {
       crumb(`${key}:gpu`);
-      s = await ort.InferenceSession.create(bytes, opts('webgpu'));
+      s = await ort.InferenceSession.create(bytes, opts('webgpu', key));
       if (!(await validate(s, key))) { await s.release(); s = null; }
     } catch (e) { console.warn('WebGPU açılamadı', key, e?.message || e); s = null; }
   }
   modelEP[key] = s ? 'GPU' : 'CPU';
-  if (!s) { crumb(`${key}:cpu`); s = await ort.InferenceSession.create(bytes, opts('wasm')); }
+  if (!s) { crumb(`${key}:cpu`); s = await ort.InferenceSession.create(bytes, opts('wasm', key)); }
   crumb('');
   bytes = null; await sleep(400);
   sessions[key] = new SafeSession(key, s); modelState[key] = 'loaded'; $('modelProg').hidden = true; renderModels();
@@ -205,6 +219,10 @@ function renderModels() {
   $('loadModels').hidden = !!engine; $('loadModels').disabled = starting;
   $('loadModels').textContent = starting ? 'Hazırlanıyor…' : dl ? `Modelleri indir ve başlat (${fmtMB(dl)})` : 'Başlat';
 }
+async function cleanCache() { // eski (büyük) model sürümlerini telefondan siler
+  try { const c = await caches.open(CACHE), keep = new Set(Object.values(MODELS).map(m => ckey(m.file)));
+    for (const req of await c.keys()) if (!keep.has(req.url)) await c.delete(req); } catch {}
+}
 async function refreshModelState() {
   for (const k of Object.keys(MODELS)) if (modelState[k] !== 'loaded') modelState[k] = (await cacheHas(MODELS[k].file)) ? 'cached' : 'missing';
   renderModels();
@@ -220,7 +238,7 @@ function lastCrash() {
   const step = store('step'); if (!step) return null;
   crumb('');
   const [key, phase] = step.split(':'), n = +(store('crash-' + step) || 0) + 1; store('crash-' + step, String(n));
-  if (phase === 'gpu') store('nogpu2-' + key, '1');
+  if (phase === 'gpu') store('nogpu3-' + key, '1');
   return { key, phase, n, text: `Önceki açılışta sayfa “${MODELS[key]?.label || key}” ${STEP_TR[phase] || ''} kapandı (telefonun belleği yetmedi).` +
     (phase === 'gpu' ? ' Bu model bundan sonra işlemcide açılacak.' : phase === 'cpu' ? ' Daha az model kullanan “Hızlı” profili seçildi.' : '') };
 }
@@ -551,6 +569,7 @@ function refresh() {
 (async () => {
   renderIdentities(); renderPreset(); refresh();
   gpuOK = await detectGPU();
+  await cleanCache();
   const crash = lastCrash();
   if (crash?.phase === 'cpu' && S.preset !== 'fast') { S.preset = 'fast'; store('preset', 'fast'); }
   await refreshModelState(); renderPreset();
